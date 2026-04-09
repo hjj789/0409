@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>互动蜡笔日记本</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Comic Sans MS', 'Chalkboard SE', 'STKaiti', '楷体', cursive, sans-serif;
+            background-color: #fdfbf7;
+        }
+
+        /* 侧边栏的手绘风格边框 */
+        .hand-drawn-sidebar {
+            border-left: 4px solid #4a5568;
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(8px);
+            box-shadow: -8px 0px 15px rgba(0, 0, 0, 0.05);
+        }
+
+        /* 蜡笔风滚动条 */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+
+        .btn-hand-drawn {
+            border: 2px solid #4a5568;
+            border-radius: 255px 15px 225px 15px/15px 225px 15px 255px;
+            transition: all 0.2s ease;
+        }
+        .btn-hand-drawn:hover {
+            transform: scale(1.02) rotate(-1deg);
+            background-color: #bbf7d0;
+        }
+        .btn-hand-drawn:active {
+            transform: scale(0.98);
+        }
+
+        .entry-card {
+            border: 2px solid #94a3b8;
+            border-radius: 15px 225px 15px 255px/255px 15px 225px 15px;
+            background: rgba(255,255,255,0.7);
+        }
+    </style>
+</head>
+<body class="flex h-screen w-screen overflow-hidden">
+
+    <!-- 左侧画板区域 -->
+    <div id="canvas-container" class="flex-grow relative h-full bg-[#fdfbf7]">
+        <!-- 静态背景层 -->
+        <canvas id="bg-canvas" class="absolute inset-0 w-full h-full z-0"></canvas>
+        <!-- 动态动画层 -->
+        <canvas id="anim-canvas" class="absolute inset-0 w-full h-full z-10 pointer-events-none"></canvas>
+    </div>
+
+    <!-- 右侧互动侧边栏 -->
+    <aside class="hand-drawn-sidebar w-80 md:w-96 flex flex-col h-full z-20 shrink-0 p-5">
+        <h1 class="text-3xl font-bold mb-2 text-gray-800 tracking-wide text-center">🖍️ 心情草坪</h1>
+        <p class="text-sm text-gray-500 mb-4 text-center leading-relaxed">
+            记录你的今天。<br>生气会有小狗捣乱，伤心会下雨，开心会长出花草。经历越多，草坪越繁茂。
+        </p>
+
+        <!-- 素材加载状态区 (已移除手动上传) -->
+        <div id="sprite-status-container" class="mb-4 text-xs text-center border-2 border-blue-300 p-3 rounded-xl bg-blue-50 transition-colors shadow-sm">
+            <span id="sprite-status" class="text-blue-600 font-bold">⏳ 正在自动加载素材...</span>
+        </div>
+
+        <div class="flex flex-col gap-3 mb-6">
+            <textarea id="diary-input" class="w-full h-32 p-3 border-2 border-gray-600 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-green-400 bg-white/60 text-gray-700 placeholder-gray-400" placeholder="今天发生了什么事呢？随便吐槽或者记录吧..."></textarea>
+            <button id="add-diary-btn" class="btn-hand-drawn bg-white text-gray-800 px-4 py-2 font-bold shadow-sm cursor-pointer">
+                写进日记 ✍️
+            </button>
+        </div>
+
+        <div class="flex-grow overflow-y-auto pr-2 space-y-4" id="diary-list">
+            <!-- 日记记录 -->
+        </div>
+    </aside>
+
+    <script>
+        let diaryEntries = [];
+
+        const container = document.getElementById('canvas-container');
+        const bgCanvas = document.getElementById('bg-canvas');
+        const animCanvas = document.getElementById('anim-canvas');
+        const ctxBg = bgCanvas.getContext('2d');
+        const ctxAnim = animCanvas.getContext('2d');
+
+        let w = container.clientWidth || window.innerWidth;
+        let h = container.clientHeight || window.innerHeight;
+        let horizon = h * 0.55; 
+        
+        // --- 状态管理 ---
+        let totalEntries = 0;
+        let addedPlantsCount = 0;
+        let mood = 'normal';
+        let isRaining = false;
+        let showRainbow = false;
+        let rainTimeoutId = null;
+        let sprouts = [];
+        let entities = [];
+        let rainParticles = [];
+
+        // --- 独立素材加载引擎 ---
+        const imageAssets = {
+            'bg_sunny': 'Gemini_Generated_Image_k08sw0k08sw0k08s.png',
+            'bg_rainy': 'Gemini_Generated_Image_hd85iyhd85iyhd85.png',
+            'grass': 'xiaocao.png',
+            'flower1': '花.png',
+            'flower2': '花2.png',
+            'flower3': '花3.png',
+            'raindrop': '水滴.png',
+            'cow': '哞.png',
+            'poop': 'bb.png',
+            'beetle': 'kelang.png',
+            'dog': '小狗.png'
+        };
+
+        // 初始化空的 Image 对象容器
+        const loadedImages = {};
+        Object.keys(imageAssets).forEach(key => {
+            loadedImages[key] = new Image();
+        });
+
+        // 加载计数 & UI状态
+        let loadedCount = 0;
+        let totalKeys = Object.keys(imageAssets).length;
+        const statusSpan = document.getElementById('sprite-status');
+        const statusContainer = document.getElementById('sprite-status-container');
+
+        // 更新素材加载进度UI (并触发画布重绘)
+        function updateLoadStatus() {
+            const completeKeys = Object.keys(imageAssets).filter(k => 
+                loadedImages[k] && loadedImages[k].complete && loadedImages[k].naturalWidth > 0
+            ).length;
+            loadedCount = completeKeys;
+            
+            if (loadedCount === totalKeys) {
+                statusSpan.innerHTML = "🎉 所有素材加载完成！草坪生机勃勃 🎉";
+                statusContainer.className = "mb-4 text-xs text-center border-2 border-green-400 p-3 rounded-xl bg-green-100 shadow-sm";
+                statusSpan.className = "text-green-700 font-bold";
+            } else {
+                statusSpan.innerHTML = `🖌️ 正在自动加载本地素材 ${loadedCount}/${totalKeys}...`;
+                statusContainer.className = "mb-4 text-xs text-center border-2 border-dashed border-amber-400 p-3 rounded-xl bg-amber-50 shadow-sm";
+                statusSpan.className = "font-bold text-amber-700";
+            }
+            // 每加载成功一个素材就尝试重绘，让画面逐步丰富
+            drawCrayonWorld();
+        }
+
+        // ---------- 🌟 核心：自动加载 image 文件夹内所有素材 (页面启动时) ----------
+        function autoLoadImageFolder() {
+            // 构造相对路径 (html 同级目录下的 image 文件夹)
+            const basePath = './image/';
+
+            // 遍历每个素材，尝试加载本地图片
+            for (let key of Object.keys(imageAssets)) {
+                const fileName = imageAssets[key];
+                const img = loadedImages[key];
+                const fullPath = basePath + fileName;
+                
+                // 设置加载完成/失败处理
+                img.onload = () => {
+                    // 加载成功，更新状态并重绘
+                    updateLoadStatus();
+                };
+                img.onerror = () => {
+                    // 加载失败 (文件不存在或格式不对)，依然更新计数
+                    // 为了UI显示准确，手动触发updateLoadStatus
+                    console.warn(`无法加载素材图片: ${fullPath}，请检查 image 文件夹下是否存在该文件。`);
+                    updateLoadStatus();
+                };
+                // 开始加载
+                img.src = fullPath;
+            }
+            // 初始刷新一次UI（大部分未完成时显示进度）
+            updateLoadStatus();
+        }
+
+        // 通用图像绘制函数
+        function drawImg(ctx, key, x, y, dw, dh, flipX = 1) {
+            const img = loadedImages[key];
+            if (!img || !img.complete || img.naturalWidth === 0) return false;
+
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.scale(flipX, 1);
+            ctx.drawImage(img, -dw/2, -dh/2, dw, dh);
+            ctx.restore();
+            return true;
+        }
+
+        // 初始化雨滴
+        for(let i=0; i<150; i++) {
+            rainParticles.push({
+                x: Math.random() * 3000, 
+                y: Math.random() * 2000,
+                speed: (15 + Math.random() * 15) * 0.75,
+                wind: (1 + Math.random() * 3) * 0.75,
+                length: 20 + Math.random() * 20
+            });
+        }
+
+        // 监听并加载本地数据 (LocalStorage)
+        function loadUserData() {
+            try {
+                const savedState = localStorage.getItem('crayonGameState');
+                if (savedState) {
+                    const data = JSON.parse(savedState);
+                    totalEntries = data.totalEntries || 0;
+                    addedPlantsCount = data.addedPlantsCount || 0;
+                    
+                    let sproutsCount = data.sproutsCount || 0;
+                    sprouts = [];
+                    for(let i=0; i<sproutsCount; i++) {
+                        sprouts.push({
+                            x: 50 + Math.random() * (w - 100), 
+                            y: horizon + 30 + Math.random() * (h - horizon - 60)
+                        });
+                    }
+                }
+                const savedEntries = localStorage.getItem('crayonDiaryEntries');
+                if (savedEntries) {
+                    diaryEntries = JSON.parse(savedEntries);
+                    diaryEntries.sort((a, b) => a.timestamp - b.timestamp);
+                }
+                renderDiaryList();
+                drawCrayonWorld(); 
+            } catch (error) { console.error("加载本地数据失败", error); }
+        }
+
+        function saveState() {
+            try {
+                const state = {
+                    totalEntries: totalEntries,
+                    addedPlantsCount: addedPlantsCount,
+                    sproutsCount: sprouts.length
+                };
+                localStorage.setItem('crayonGameState', JSON.stringify(state));
+            } catch (e) { console.error("保存状态失败", e); }
+        }
+
+        function renderDiaryList() {
+            const list = document.getElementById('diary-list');
+            list.innerHTML = '';
+            diaryEntries.forEach(entry => {
+                const card = document.createElement('div');
+                card.className = 'entry-card p-4 shadow-sm';
+                card.innerHTML = `
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="font-bold text-gray-700">${entry.emoji} 记事</span>
+                        <span class="text-xs text-gray-500">${entry.timeString}</span>
+                    </div>
+                    <p class="text-gray-800 text-sm leading-relaxed">${entry.text.replace(/\n/g, '<br>')}</p>
+                `;
+                list.appendChild(card);
+            });
+            list.scrollTop = list.scrollHeight;
+        }
+
+        // --- 画布回退绘制方案 ---
+        function drawRoughStroke(ctx, x1, y1, x2, y2, color, thickness, alpha) {
+            ctx.beginPath();
+            ctx.strokeStyle = color; ctx.lineWidth = thickness;
+            ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.globalAlpha = alpha;
+            const dist = Math.hypot(x2 - x1, y2 - y1);
+            const steps = Math.max(3, Math.floor(dist / 10));
+            ctx.moveTo(x1, y1);
+            for(let i = 1; i <= steps; i++) {
+                const t = i / steps;
+                ctx.lineTo(x1 + (x2 - x1) * t + (Math.random() - 0.5) * 6, y1 + (y2 - y1) * t + (Math.random() - 0.5) * 6);
+            }
+            ctx.stroke(); ctx.globalAlpha = 1;
+        }
+
+        function drawWobblyLine(ctx, x1, y1, x2, y2, color, width) {
+            ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap = 'round';
+            ctx.moveTo(x1, y1);
+            ctx.quadraticCurveTo((x1+x2)/2 + (Math.random()-0.5)*4, (y1+y2)/2 + (Math.random()-0.5)*4, x2, y2);
+            ctx.stroke();
+        }
+
+        // --- 背景绘制逻辑 ---
+        function drawCrayonWorld() {
+            w = container.clientWidth || window.innerWidth;
+            h = container.clientHeight || window.innerHeight;
+            bgCanvas.width = w; bgCanvas.height = h;
+            animCanvas.width = w; animCanvas.height = h;
+            horizon = h * 0.55;
+
+            const bgKey = mood === 'sad' ? 'bg_rainy' : 'bg_sunny';
+            const bgImg = loadedImages[bgKey];
+
+            // ===== 优先使用加载的背景图 =====
+            if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
+                ctxBg.drawImage(bgImg, 0, 0, w, h);
+
+                // 根据记录增加花朵和草丛 (随机使用小草、花1、花2、花3)
+                for(let i=0; i < addedPlantsCount; i++) {
+                    let px = ((i * 37) % 100) / 100 * w; 
+                    let py = horizon + 30 + (((i * 17) % 100) / 100 * (h - horizon - 60));
+                    let flip = i % 2 === 0 ? 1 : -1;
+                    
+                    // 循环使用 0:草, 1:花1, 2:花2, 3:花3
+                    let r = (i * 17) % 4; 
+                    let key = r === 0 ? 'grass' : (r === 1 ? 'flower1' : (r === 2 ? 'flower2' : 'flower3'));
+                    
+                    let img = loadedImages[key];
+                    if (img && img.complete && img.naturalWidth > 0) {
+                        let targetHeight = (key === 'grass') ? 45 : 60; // 花朵稍高一点
+                        let targetWidth = targetHeight * (img.naturalWidth / img.naturalHeight); // 严格保持原始比例
+                        drawImg(ctxBg, key, px, py, targetWidth, targetHeight, flip);
+                    } else {
+                        // 回退保护
+                        drawImg(ctxBg, key, px, py, 50, 50, flip);
+                    }
+                }
+
+                for (let s of sprouts) {
+                    let img = loadedImages['grass'];
+                    if (img && img.complete && img.naturalWidth > 0) {
+                        let targetHeight = 45;
+                        let targetWidth = targetHeight * (img.naturalWidth / img.naturalHeight);
+                        drawImg(ctxBg, 'grass', s.x, s.y, targetWidth, targetHeight, 1);
+                    } else {
+                        drawImg(ctxBg, 'grass', s.x, s.y, 45, 45, 1);
+                    }
+                }
+                return; 
+            }
+
+            // ===== 回退：纯代码手绘模式 =====
+            ctxBg.fillStyle = '#fdfbf7';
+            ctxBg.fillRect(0, 0, w, h);
+
+            const skyColors = mood === 'sad' ? ['#9ca3af', '#6b7280', '#d1d5db', '#4b5563'] : ['#7dd3fc', '#38bdf8', '#bae6fd', '#0ea5e9'];
+            for(let i = 0; i < Math.floor((w * horizon) / 800); i++) {
+                let len = 100 + Math.random() * 250; 
+                drawRoughStroke(ctxBg, Math.random() * w - len/2, Math.random() * horizon, Math.random() * w + len/2, Math.random() * horizon + (Math.random()-0.5)*30, skyColors[Math.floor(Math.random() * skyColors.length)], 8 + Math.random()*12, 0.25);
+            }
+
+            if (mood !== 'sad') {
+                for(let i = 0; i < 80; i++) {
+                    let angle = Math.random() * Math.PI * 2, r = Math.random() * 70;
+                    drawRoughStroke(ctxBg, w*0.8 + Math.cos(angle)*r, h*0.2 + Math.sin(angle)*r, w*0.8 + Math.cos(angle)*r + 15, h*0.2 + Math.sin(angle)*r + 15, Math.random() > 0.3 ? '#fde047' : '#fbbf24', 6 + Math.random()*5, 0.5);
+                }
+            } else {
+                for(let c = 0; c < 8; c++) {
+                    let cx = Math.random() * w, cy = Math.random() * (horizon * 0.4);
+                    for(let i = 0; i < 60; i++) {
+                        let angle = Math.random() * Math.PI * 2, r = Math.random() * 80;
+                        drawRoughStroke(ctxBg, cx + Math.cos(angle)*r*1.5, cy + Math.sin(angle)*r*0.6, cx + Math.cos(angle)*r*1.5 + 25, cy + Math.sin(angle)*r*0.6, '#9ca3af', 10 + Math.random()*5, 0.6);
+                    }
+                }
+            }
+
+            const grassColors = mood === 'sad' ? ['#86efac', '#4ade80', '#22c55e'] : ['#4ade80', '#22c55e', '#16a34a', '#bef264'];
+            for(let i = 0; i < Math.floor((w * (h - horizon)) / 80) + (totalEntries * 50); i++) {
+                let x = Math.random() * w, y = horizon + Math.random() * (h - horizon), len = 10 + Math.random() * 25;
+                drawRoughStroke(ctxBg, x, y + len/2, x + (Math.random() - 0.5) * 20, y - len/2, grassColors[Math.floor(Math.random() * grassColors.length)], 3 + Math.random()*3, 0.6);
+            }
+
+            const flowerColors = ['#ef4444', '#eab308', '#a855f7', '#ec4899', '#f97316', '#60a5fa'];
+            for(let i=0; i < addedPlantsCount; i++) {
+                let x = Math.random() * w, y = horizon + 20 + Math.random() * (h - horizon - 40);
+                if (Math.random() > 0.6) {
+                    drawRoughStroke(ctxBg, x, y, x, y-20, '#15803d', 3, 0.8);
+                    for(let j=0; j<6; j++) drawRoughStroke(ctxBg, x, y-20, x + Math.cos((j/6)*Math.PI*2)*8, y-20 + Math.sin((j/6)*Math.PI*2)*8, flowerColors[Math.floor(Math.random() * flowerColors.length)], 5, 0.9);
+                } else {
+                    drawRoughStroke(ctxBg, x, y, x, y-25, '#166534', 4, 0.9);
+                    drawRoughStroke(ctxBg, x, y-10, x-15, y-20, '#16a34a', 3, 0.9);
+                    drawRoughStroke(ctxBg, x, y-12, x+15, y-22, '#16a34a', 3, 0.9);
+                }
+            }
+            for (let s of sprouts) {
+                drawRoughStroke(ctxBg, s.x, s.y, s.x, s.y - 30, '#166534', 5, 0.9);
+                drawRoughStroke(ctxBg, s.x, s.y - 15, s.x - 15, s.y - 25, '#166534', 4, 0.9);
+                drawRoughStroke(ctxBg, s.x, s.y - 18, s.x + 15, s.y - 28, '#166534', 4, 0.9);
+            }
+        }
+
+        // --- 动画实体类 ---
+
+        class Dog {
+            constructor() {
+                this.x = -80; this.y = horizon + 80 + Math.random() * 100;
+                this.targetX = w/2 + (Math.random()-0.5)*150;
+                this.state = 'walking_in'; this.timer = 0; this.frame = 0; this.pooped = false;
+            }
+            update() {
+                this.frame += 0.15 * 0.75;
+                if(this.state === 'walking_in') {
+                    this.x += 3 * 0.75;
+                    if(this.x >= this.targetX) { this.state = 'pooping'; this.timer = Math.floor(120 / 0.75); }
+                } else if(this.state === 'pooping') {
+                    this.timer--;
+                    if(this.timer === Math.floor(40 / 0.75) && !this.pooped) {
+                        let poop = new Poop(this.x - 40, this.y + 25);
+                        entities.push(poop); this.pooped = true;
+                        setTimeout(() => { if(!poop.dead) entities.push(new Beetle(poop)); }, 60000);
+                    }
+                    if(this.timer <= 0) this.state = 'walking_out';
+                } else if(this.state === 'walking_out') {
+                    this.x += 4 * 0.75;
+                    if(this.x > w + 150) this.dead = true;
+                }
+            }
+            draw(ctx) {
+                let bodyDrop = this.state === 'pooping' ? 10 : 0;
+                
+                if (drawImg(ctx, 'dog', this.x, this.y + bodyDrop, 150, 70, -1)) return;
+
+                let legOffset = this.state === 'pooping' ? 0 : Math.sin(this.frame) * 12;
+                let tailAngle = this.state === 'pooping' ? -Math.PI/3 : Math.sin(this.frame)*0.5;
+                drawWobblyLine(ctx, this.x - 25, this.y + bodyDrop, this.x + 25, this.y + bodyDrop, '#333', 6);
+                drawWobblyLine(ctx, this.x + 25, this.y + bodyDrop, this.x + 35, this.y - 20 + bodyDrop, '#333', 6); 
+                ctx.beginPath(); ctx.arc(this.x + 40, this.y - 25 + bodyDrop, 12, 0, Math.PI*2); ctx.fillStyle='#fdfbf7'; ctx.fill(); ctx.lineWidth=4; ctx.stroke(); 
+                drawWobblyLine(ctx, this.x + 45, this.y - 35 + bodyDrop, this.x + 55, this.y - 15 + bodyDrop, '#333', 4);
+                drawWobblyLine(ctx, this.x - 15, this.y + bodyDrop, this.x - 15 + legOffset, this.y + 30, '#333', 4);
+                drawWobblyLine(ctx, this.x - 5, this.y + bodyDrop, this.x - 5 - legOffset, this.y + 30, '#333', 4);
+                drawWobblyLine(ctx, this.x + 10, this.y + bodyDrop, this.x + 10 + legOffset, this.y + 30, '#333', 4);
+                drawWobblyLine(ctx, this.x + 20, this.y + bodyDrop, this.x + 20 - legOffset, this.y + 30, '#333', 4);
+                drawWobblyLine(ctx, this.x - 25, this.y + bodyDrop, this.x - 40, this.y - 10 + bodyDrop + tailAngle*15, '#333', 5);
+            }
+        }
+
+        class Poop {
+            constructor(x, y) { this.x = x; this.y = y; this.isBall = false; this.dead = false; }
+            update() {}
+            draw(ctx) {
+                if (drawImg(ctx, 'poop', this.x, this.y, 45, 45)) return;
+
+                const color = '#78350f';
+                if(this.isBall) {
+                    ctx.beginPath(); ctx.arc(this.x, this.y - 12, 12, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 3; ctx.stroke();
+                } else {
+                    drawWobblyLine(ctx, this.x - 15, this.y, this.x + 15, this.y, color, 8);
+                    drawWobblyLine(ctx, this.x - 10, this.y - 8, this.x + 10, this.y - 8, color, 8);
+                    drawWobblyLine(ctx, this.x - 4, this.y - 16, this.x + 4, this.y - 16, color, 8);
+                }
+            }
+        }
+
+        class Beetle {
+            constructor(targetPoop) {
+                this.x = w + 80; this.y = targetPoop.y; this.target = targetPoop;
+                this.state = 'walking_to'; this.frame = 0;
+            }
+            update() {
+                this.frame += 0.3 * 0.75;
+                if(this.state === 'walking_to') {
+                    this.x -= 2.5 * 0.75;
+                    if(this.x <= this.target.x + 20) { this.state = 'rolling'; this.target.isBall = true; }
+                } else if(this.state === 'rolling') {
+                    this.x += 2 * 0.75;
+                    this.target.x = this.x - 20; 
+                    if(this.x > w + 100) { this.dead = true; this.target.dead = true; }
+                }
+            }
+            draw(ctx) {
+                let dir = this.state === 'walking_to' ? 1 : -1;
+                if (drawImg(ctx, 'beetle', this.x, this.y - 10, 60, 50, dir)) return;
+
+                let legOffset = Math.sin(this.frame) * 6;
+                ctx.beginPath(); ctx.arc(this.x, this.y - 6, 8, 0, Math.PI*2); ctx.fillStyle = '#111'; ctx.fill(); ctx.stroke();
+                drawWobblyLine(ctx, this.x, this.y - 6, this.x - 12, this.y - 6 + legOffset, '#111', 2);
+                drawWobblyLine(ctx, this.x, this.y - 6, this.x + 12, this.y - 6 - legOffset, '#111', 2);
+                drawWobblyLine(ctx, this.x, this.y - 6, this.x - 10, this.y - 12 + legOffset, '#111', 2);
+                drawWobblyLine(ctx, this.x, this.y - 6, this.x + 10, this.y - 12 - legOffset, '#111', 2);
+            }
+        }
+
+        class Cow {
+            constructor() {
+                const edge = Math.floor(Math.random() * 4); 
+                if (edge === 0) { this.x = Math.random() * w; this.y = horizon - 20; }
+                else if (edge === 1) { this.x = w + 50; this.y = horizon + Math.random()*(h-horizon); }
+                else if (edge === 2) { this.x = Math.random() * w; this.y = h + 50; }
+                else { this.x = -50; this.y = horizon + Math.random()*(h-horizon); }
+
+                this.state = 'walking'; this.timer = 0; this.frame = 0;
+                this.pickNewTarget(); this.lifeTime = 0;
+            }
+            pickNewTarget() {
+                this.targetX = 50 + Math.random() * (w - 100);
+                this.targetY = horizon + 20 + Math.random() * (h - horizon - 40);
+                this.dirX = this.targetX > this.x ? -1 : 1; 
+                const dx = this.targetX - this.x, dy = this.targetY - this.y;
+                const dist = Math.hypot(dx, dy);
+                const speed = 1.0 * 0.75;
+                this.vx = (dx / dist) * speed; this.vy = (dy / dist) * speed;
+            }
+            update() {
+                this.lifeTime++; this.frame += 0.12 * 0.75;
+                if (this.state === 'walking') {
+                    this.x += this.vx; this.y += this.vy;
+                    if (Math.hypot(this.targetX - this.x, this.targetY - this.y) < 5) {
+                        const rand = Math.random();
+                        if (rand < 0.4) { this.state = 'eating'; this.timer = Math.floor((150 + Math.random()*100) / 0.75); }
+                        else if (rand < 0.7) { this.state = 'sleeping'; this.timer = Math.floor((300 + Math.random()*200) / 0.75); }
+                        else {
+                            if (this.lifeTime > 1500) {
+                                this.state = 'leaving';
+                                this.targetX = Math.random() > 0.5 ? -150 : w + 150;
+                                this.targetY = horizon + Math.random()*(h-horizon);
+                                const dx = this.targetX - this.x, dy = this.targetY - this.y, d = Math.hypot(dx, dy);
+                                this.vx = (dx/d)*0.75; this.vy = (dy/d)*0.75;
+                                this.dirX = this.targetX > this.x ? -1 : 1;
+                            } else { this.pickNewTarget(); }
+                        }
+                    }
+                } else if (this.state === 'eating') {
+                    this.timer--;
+                    if (this.timer === Math.floor(50 / 0.75)) {
+                        let eaten = false;
+                        if (addedPlantsCount > 0) { addedPlantsCount--; eaten = true; }
+                        else if (sprouts.length > 0) { sprouts.pop(); eaten = true; }
+                        else if (totalEntries > 0) { totalEntries--; eaten = true; }
+                        if (eaten) { saveState(); drawCrayonWorld(); }
+                    }
+                    if (this.timer <= 0) { this.state = 'walking'; this.pickNewTarget(); }
+                } else if (this.state === 'sleeping') {
+                    this.timer--;
+                    if (this.timer <= 0) { this.state = 'walking'; this.pickNewTarget(); }
+                } else if (this.state === 'leaving') {
+                    this.x += this.vx; this.y += this.vy;
+                    if (this.x < -150 || this.x > w + 150 || this.y > h + 150 || this.y < horizon - 150) this.dead = true;
+                }
+            }
+            draw(ctx) {
+                let legOffset = 0, headDrop = 0;
+                if (this.state === 'walking' || this.state === 'leaving') legOffset = Math.sin(this.frame) * 8;
+                else if (this.state === 'eating') headDrop = 15 + Math.sin(this.frame * 0.5) * 5; 
+                else if (this.state === 'sleeping') headDrop = 20;
+
+                let baseScale = 0.5 + Math.max(0, (this.y - horizon)) / (h - horizon) * 1.0;
+                if (baseScale < 0.3) baseScale = 0.3; if (baseScale > 2.0) baseScale = 2.0;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.scale(baseScale, baseScale);
+
+                if (this.state === 'sleeping' && Math.sin(this.frame * 0.2) > 0) {
+                    ctx.save();
+                    ctx.font = "bold 16px 'Comic Sans MS'"; ctx.fillStyle = "#6b7280";
+                    ctx.fillText("Zzz", (this.dirX < 0 ? -50 : 20), -60 - Math.sin(this.frame * 0.2) * 10);
+                    ctx.restore();
+                }
+
+                if (drawImg(ctx, 'cow', 0, headDrop, 150, 110, this.dirX)) {
+                    ctx.restore();
+                    return;
+                }
+
+                ctx.scale(this.dirX, 1);
+                const color = '#374151';
+                drawWobblyLine(ctx, -30, 0, 30, 0, color, 12);
+                drawWobblyLine(ctx, -25, 0, -45, -10 + headDrop, color, 8);
+                ctx.beginPath(); ctx.arc(-48, -5 + headDrop, 6, 0, Math.PI*2); ctx.fillStyle = '#fca5a5'; ctx.fill(); 
+                drawWobblyLine(ctx, -40, -12 + headDrop, -43, -22 + headDrop, color, 3);
+                drawWobblyLine(ctx, -35, -10 + headDrop, -32, -20 + headDrop, color, 3);
+                drawWobblyLine(ctx, -20, 0, -20 + legOffset, 35, color, 5);
+                drawWobblyLine(ctx, -10, 0, -10 - legOffset, 35, color, 5);
+                drawWobblyLine(ctx, 10, 0, 10 + legOffset, 35, color, 5);
+                drawWobblyLine(ctx, 20, 0, 20 - legOffset, 35, color, 5);
+                drawWobblyLine(ctx, 30, 0, 45, 15, color, 3);
+                ctx.restore();
+            }
+        }
+
+        // --- 主动画循环 ---
+        let globalFrameCount = 0;
+        function animate() {
+            ctxAnim.clearRect(0, 0, w, h);
+            globalFrameCount++;
+
+            if(globalFrameCount % 120 === 0 && Math.random() < 0.15) {
+                if(!entities.some(e => e instanceof Cow)) entities.push(new Cow());
+            }
+
+            for(let i=entities.length-1; i>=0; i--) {
+                entities[i].update();
+                if(entities[i].dead) entities.splice(i, 1);
+            }
+
+            entities.sort((a, b) => a.y - b.y);
+            for(let e of entities) e.draw(ctxAnim);
+
+            if(isRaining) {
+                for(let p of rainParticles) {
+                    p.y += p.speed; p.x -= p.wind;
+                    if(p.y > h) { p.y = -50; p.x = Math.random() * (w + 1000); }
+                    
+                    if (!drawImg(ctxAnim, 'raindrop', p.x, p.y, 15, 25)) {
+                        ctxAnim.strokeStyle = '#93c5fd'; ctxAnim.lineWidth = 3; ctxAnim.lineCap = 'round';
+                        ctxAnim.beginPath(); ctxAnim.moveTo(p.x, p.y); ctxAnim.lineTo(p.x - p.wind*1.5, p.y + p.length); ctxAnim.stroke();
+                    }
+                }
+            }
+
+            const sunnyBg = loadedImages['bg_sunny'];
+            if(showRainbow && !(sunnyBg && sunnyBg.complete && sunnyBg.naturalWidth > 0)) {
+                const colors = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#8b5cf6'];
+                const rBase = Math.min(w, h) * 0.45; const cx = w/2, cy = horizon;
+                for(let i=0; i<colors.length; i++) {
+                    ctxAnim.beginPath();
+                    for(let angle = Math.PI; angle >= 0; angle -= 0.05) {
+                        let r = rBase - i*18 + (Math.random()-0.5)*4;
+                        let px = cx + Math.cos(angle)*r, py = cy - Math.sin(angle)*r; 
+                        if(angle === Math.PI) ctxAnim.moveTo(px, py); else ctxAnim.lineTo(px, py);
+                    }
+                    ctxAnim.strokeStyle = colors[i]; ctxAnim.lineWidth = 14; ctxAnim.globalAlpha = 0.8; ctxAnim.stroke();
+                }
+                ctxAnim.globalAlpha = 1;
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // --- 交互逻辑 ---
+
+        function analyzeText(text) {
+            const angryWords = ['生气', '气', '烦', '讨厌', '槽', '妈的', '无语', '糟糕', '怒', '恨', '滚', '傻', '不爽', '发火', '草', '气死', '炸', '破防', '栓Q', '画大饼', '甩锅', 'PUA', '内卷', '卷', '离谱', '搞心态', '抓狂', '崩溃', '暴躁', '高血压', '背锅', '有病'];
+            const sadWords = ['伤心', '难过', '哭', '悲伤', '痛', '抑郁', '哎', '唉', '沮丧', '累', '失望', '孤单', '没用', '低落', '难受', '失落', '颓废', '绝望', '无力', '心碎', '叹气', 'emo', '躺平', '摆烂', '心累', '耗尽', '掏空', '吃土', '焦虑', '脱发', '秃', '裁员', '优化', '毕业', '牛马', '社畜', '打工'];
+            const happyWords = ['开心', '快乐', '高兴', '爽', '棒', '好耶', '赞', '喜', '笑', '激动', '美滋滋', '好心情', '顺利', '愉悦', '舒适', '舒服', '美好', '享受', '放松', '暖', '幸福', '满足', '摸鱼', '带薪', '下班', '涨薪', '发工资', '搞钱', '暴富', '奶茶', '贴贴', '绝绝子', 'yyds', '快乐水', '双休'];
+            const boredWords = ['无聊', '没劲', '平淡', '凑合', '闲', '发呆', '困', '疲倦', '一般般', '没意思', '坐牢', '熬时间', '混日子', '划水', '提不起劲', '麻木'];
+            
+            // 将文本转为小写以便匹配英文缩写 (如 pua, yyds, emo)
+            const lowerText = text.toLowerCase();
+
+            if(happyWords.some(w => lowerText.includes(w))) return 'happy';
+            if(angryWords.some(w => lowerText.includes(w))) return 'angry';
+            if(sadWords.some(w => lowerText.includes(w))) return 'sad';
+            if(boredWords.some(w => lowerText.includes(w))) return 'bored';
+            return 'neutral';
+        }
+
+        function triggerHappy() {
+            addedPlantsCount += Math.floor(Math.random() * 2) + 1;
+            saveState(); drawCrayonWorld();
+        }
+
+        function triggerAngry() { entities.push(new Dog()); }
+
+        function triggerSad() {
+            mood = 'sad'; isRaining = true; drawCrayonWorld();
+            if(rainTimeoutId) clearTimeout(rainTimeoutId);
+            rainTimeoutId = setTimeout(() => {
+                isRaining = false; mood = 'normal'; showRainbow = true;
+                sprouts.push({ x: 50 + Math.random() * (w - 100), y: horizon + 30 + Math.random() * (h - horizon - 60) });
+                addedPlantsCount += Math.floor(Math.random() * 2) + 1;
+                saveState(); drawCrayonWorld(); 
+                setTimeout(() => { showRainbow = false; }, 8000);
+            }, 60000); 
+        }
+
+        function triggerBored() {
+            // 无聊时只生长一株小草 (加入幼苗数组，不增加额外花朵)
+            sprouts.push({ x: 50 + Math.random() * (w - 100), y: horizon + 30 + Math.random() * (h - horizon - 60) });
+            saveState(); drawCrayonWorld();
+        }
+
+        function addDiary() {
+            const input = document.getElementById('diary-input');
+            const text = input.value.trim();
+            if(!text) return;
+
+            totalEntries++; saveState(); 
+            const sentiment = analyzeText(text);
+            
+            if(sentiment === 'happy') triggerHappy();
+            else if(sentiment === 'angry') triggerAngry();
+            else if (sentiment === 'sad') triggerSad();
+            else if (sentiment === 'bored') triggerBored();
+            else if(mood !== 'sad') drawCrayonWorld();
+
+            const timeString = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            let emoji = sentiment === 'angry' ? '😠' : (sentiment === 'sad' ? '🌧️' : (sentiment === 'happy' ? '😄' : (sentiment === 'bored' ? '🥱' : '🌱')));
+
+            input.value = '';
+
+            try {
+                diaryEntries.push({ id: Date.now().toString(), text, sentiment, emoji, timeString, timestamp: Date.now() });
+                localStorage.setItem('crayonDiaryEntries', JSON.stringify(diaryEntries));
+                renderDiaryList();
+            } catch(e) { console.error("保存日记失败", e); }
+        }
+
+        document.getElementById('add-diary-btn').addEventListener('click', addDiary);
+
+        // 🌟 页面加载时自动调用素材加载
+        window.onload = () => {
+            autoLoadImageFolder(); // 自动加载图片素材
+            loadUserData(); 
+            animate();
+        };
+
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => { drawCrayonWorld(); }, 300);
+        });
+
+    </script>
+</body>
+</html>
